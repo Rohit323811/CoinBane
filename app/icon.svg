@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="CoinBane">
+  <!--
+    The CoinBane face: a mask torn down the middle, black to the right and bone
+    white to the left, an eye in each half inverted into the other's colour and
+    a grin across the seam. The same geometry as components/CoinBaneLogo.tsx,
+    which reads it from lib/face.ts — a favicon cannot import, so the
+    coordinates are repeated here, rounded to the same two decimals.
+
+    Simplified in one way only: no pupils. At 16px in a tab strip they are under
+    a pixel of speckle and read as dirt. The cyan rim stays, because the black
+    half would otherwise disappear on a dark tab strip.
+  -->
+  <defs>
+    <!-- The tear is the boundary between the halves, so the black region is cut
+         by the head rather than fitted to it. -->
+    <clipPath id="cb-icon-head">
+      <path d="M 16 1.6 C 26.8 1.6 30.4 5.2 30.4 17.4 C 30.4 27.8 27.6 31 16 31 C 4.4 31 1.6 27.8 1.6 17.4 C 1.6 5.2 5.2 1.6 16 1.6 Z" />
+    </clipPath>
+  </defs>
+
+  <!-- The head, bone white. -->
+  <path
+    d="M 16 1.6 C 26.8 1.6 30.4 5.2 30.4 17.4 C 30.4 27.8 27.6 31 16 31 C 4.4 31 1.6 27.8 1.6 17.4 C 1.6 5.2 5.2 1.6 16 1.6 Z"
+    fill="#F1F4F8"
+  />
+
+  <!-- Everything to the right of the tear, in pitch black. -->
+  <g clip-path="url(#cb-icon-head)">
+    <path
+      d="M 15.3 -1.5 L 16.9 2.6 L 15.1 6.4 L 17 10.6 L 15.2 14.8 L 16.7 19.2 L 15.4 22.6 L 16.4 27.6 L 15.6 33.5 L 34 33.5 L 34 -1.5 Z"
+      fill="#000000"
+    />
+  </g>
+
+  <!-- The grin, cut in two on the tear. -->
+  <path d="M 7 22.8 L 11.6 25 L 16 25.6" fill="none" stroke="#000000" stroke-width="1.8" stroke-linejoin="bevel" />
+  <path d="M 16 25.6 L 20.4 24.8 L 25.2 22.4" fill="none" stroke="#F1F4F8" stroke-width="1.8" stroke-linejoin="bevel" />
+
+  <!-- One eye per half, each inverted into the other. -->
+  <path d="M 6.4 12.8 L 11 13 L 14.4 16.9 L 9.4 16.6 Z" fill="#000000" />
+  <path d="M 25.6 12.8 L 21 13 L 17.6 16.9 L 22.6 16.6 Z" fill="#F1F4F8" />
+
+  <!-- Hairline rim, so the black half keeps an edge on a dark tab strip. -->
+  <path
+    d="M 16 1.6 C 26.8 1.6 30.4 5.2 30.4 17.4 C 30.4 27.8 27.6 31 16 31 C 4.4 31 1.6 27.8 1.6 17.4 C 1.6 5.2 5.2 1.6 16 1.6 Z"
+    fill="none"
+    stroke="#63D8FF"
+    stroke-opacity="0.4"
+    stroke-width="0.5"
+  />
+</svg>
