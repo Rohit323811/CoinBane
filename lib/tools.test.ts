@@ -8,10 +8,11 @@ import { scoreInvoiceTool } from "./tools/score.ts";
 /**
  * The tool schemas are a provider boundary, not just types.
  *
- * A numeric enum here is valid TypeScript and valid zod, and it still takes the
- * whole chat down: Gemini compiles it to a JSON-schema enum of numbers and
- * rejects the request with "Invalid value at ...enum[0] (TYPE_STRING)". The
- * horizon therefore crosses as a string and is coerced back inside `execute`.
+ * A numeric enum here is valid TypeScript and valid zod, and it still took the
+ * whole chat down: the previous provider compiled it to a JSON-schema enum of
+ * numbers and rejected the request with "Invalid value at ...enum[0]
+ * (TYPE_STRING)". The horizon therefore crosses as a string and is coerced
+ * back inside `execute`; this test pins that contract.
  */
 
 describe("forecastTool", () => {
@@ -30,13 +31,24 @@ describe("forecastTool", () => {
     const parsed = forecastTool.parameters.parse({
       window: "30",
       exclude: ["Nova Startup"],
-      delays: { "BigCorp Ltd": 10 },
+      delays: [{ client: "BigCorp Ltd", days: 10 }],
     });
     assert.deepEqual(parsed, {
       window: "30",
       exclude: ["Nova Startup"],
-      delays: { "BigCorp Ltd": 10 },
+      delays: [{ client: "BigCorp Ltd", days: 10 }],
     });
+  });
+
+  /*
+   * The shape matters beyond TypeScript: a `Record<string, number>` here becomes
+   * a schema-valued `additionalProperties`, which Groq rejects for every tool in
+   * the request. Delay adjustments therefore cross as named entries.
+   */
+  it("refuses delay adjustments in the old record shape", () => {
+    assert.throws(() =>
+      forecastTool.parameters.parse({ delays: { "BigCorp Ltd": 10 } }),
+    );
   });
 });
 

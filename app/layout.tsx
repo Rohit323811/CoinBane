@@ -26,7 +26,9 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={inter.variable}>
+    // suppressHydrationWarning belongs here, on the element that receives the
+    // browser extension attributes; it is not a next.config option.
+    <html lang="en" className={inter.variable} suppressHydrationWarning>
       {/*
        * Deliberately no coin here: the shell wraps every route, so a mark
        * mounted in the layout would appear everywhere. The coin belongs to the

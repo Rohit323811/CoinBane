@@ -1,6 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 
+import { latePayers } from "./analysis.ts";
 import type {
   BarDatum,
   BarWidget,
@@ -24,23 +25,15 @@ const MAX_ROWS = 200;
 const MAX_COLUMNS = 12;
 
 const chartSchema = z.object({
-  title: z.string().describe("Short chart title, framed as the user asked."),
-  subtitle: z.string().optional().describe("Optional one-line qualifier."),
-  valuePrefix: z
-    .string()
-    .optional()
-    .describe('Currency or unit prefix applied to every value, e.g. "USD ".'),
+  title: z.string().describe("Short chart title."),
+  subtitle: z.string().optional().describe("One-line qualifier."),
+  valuePrefix: z.string().optional().describe('e.g. "USD ".'),
   bars: z
     .array(
       z.object({
-        label: z
-          .string()
-          .describe("Category, client, or period for this bar."),
-        value: z.number().describe("Exact number from a PayPal tool result."),
-        flagged: z
-          .boolean()
-          .optional()
-          .describe("True when this row represents a leak or anomaly."),
+        label: z.string().describe("Category or client."),
+        value: z.number().describe("Exact number from a tool result."),
+        flagged: z.boolean().optional().describe("True for a leak."),
       }),
     )
     .min(1)
@@ -48,21 +41,42 @@ const chartSchema = z.object({
 });
 
 const gridSchema = z.object({
-  title: z.string().describe("Short grid title, framed as the user asked."),
-  subtitle: z.string().optional().describe("Optional one-line qualifier."),
+  title: z.string().describe("Short grid title."),
+  subtitle: z.string().optional().describe("One-line qualifier."),
   columns: z
     .array(
       z.object({
-        field: z.string().describe("Key used in each row object."),
-        header: z.string().describe("Column heading shown to the user."),
+        field: z.string().describe("Key used in each row."),
+        header: z.string().describe("Column heading."),
       }),
     )
     .min(1)
     .max(MAX_COLUMNS),
+  /*
+   * Rows cross the wire as arrays, not as objects keyed by column field.
+   *
+   * A `Record<string, …>` compiles to a JSON schema with a *schema-valued*
+   * `additionalProperties`, and Groq's validator refuses that outright — it
+   * requires `additionalProperties: false` on every object, and a wildcard
+   * `patternProperties` substitute is rejected as an unsupported character
+   * class. Positional cells express the same data in a shape both providers
+   * accept, and `normalizeGridWidget` maps them back onto the declared columns
+   * (object rows are still accepted for older transcripts).
+   */
+  /*
+   * Cells are strings, not `string | number | null`.
+   *
+   * Both shapes reach the model as JSON, but the union compiles to nested
+   * `anyOf` branches, and a small free-tier model reliably failed to emit valid
+   * arguments for it — Groq answered `tool_use_failed` on the grid every time a
+   * table was asked for. One plain string type is what it can actually write.
+   * `normalizeGridWidget` turns a cell that reads as a number back into one, so
+   * amounts still sort and format as amounts.
+   */
   rows: z
-    .array(z.record(z.string(), z.union([z.string(), z.number(), z.null()])))
+    .array(z.array(z.string()))
     .max(MAX_ROWS)
-    .describe("One object per record, keyed by column field."),
+    .describe("One array per record: one cell per column, in column order. Numeric cells as digits."),
 });
 
 function toFiniteNumber(value: unknown): number | null {
@@ -148,18 +162,41 @@ export function normalizeGridWidget(input: unknown): GridWidget | null {
   const rows: GridWidget["rows"] = [];
   const rawRows = Array.isArray(raw.rows) ? raw.rows : [];
   for (const item of rawRows.slice(0, MAX_ROWS)) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const source = item as Record<string, unknown>;
+    if (!item || typeof item !== "object") continue;
+    /*
+     * A positional row: the cell order is the column order the model was told
+     * to follow. Reading by index is what keeps the grid renderable without a
+     * free-form object in the schema. Objects are still accepted, so a
+     * transcript recorded before the change still renders.
+     */
+    const source = item as Record<string, unknown> | unknown[];
     const row: Record<string, string | number | null> = {};
-    for (const column of columns) {
-      const value = source[column.field];
-      row[column.field] =
-        typeof value === "number" && Number.isFinite(value)
-          ? value
-          : typeof value === "string"
-            ? value.slice(0, 120)
-            : null;
-    }
+    columns.forEach((column, index) => {
+      const value = Array.isArray(source)
+        ? source[index]
+        : source[column.field];
+
+      if (typeof value === "number" && Number.isFinite(value)) {
+        row[column.field] = value;
+        return;
+      }
+      if (typeof value !== "string") {
+        row[column.field] = null;
+        return;
+      }
+
+      const text = value.slice(0, 120);
+      /*
+       * A cell that is only a number becomes one, so the grid right-aligns and
+       * sorts it as a number rather than as text — "900" must not sort after
+       * "1,200". Dates and ids stay strings: `Number("2026-09-09")` is NaN, and
+       * a bare year is not an amount either way.
+       */
+      const numeric = /^-?[\d,]+(\.\d+)?$/.test(text.trim())
+        ? toFiniteNumber(text)
+        : null;
+      row[column.field] = numeric ?? text;
+    });
     rows.push(row);
   }
 
@@ -174,9 +211,48 @@ export function normalizeGridWidget(input: unknown): GridWidget | null {
   };
 }
 
+/**
+ * The late-payers grid, computed rather than model-written.
+ *
+ * "Why am I broke?" deserves the names behind the answer, and asking the model
+ * to fill a grid from the explanation costs a second model step — on a free plan
+ * with an 8,000-token minute that is the step that gets refused. The ledger
+ * already knows who is late, so the route attaches this whenever the agent
+ * explained income, and the model is told not to draw its own.
+ */
+export function latePayerGrid(now: Date = new Date()): GridWidget | null {
+  const rows = latePayers(now);
+  if (rows.length === 0) return null;
+
+  const owed = rows.reduce((sum, row) => sum + row.amount, 0);
+  const money = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(owed);
+
+  return {
+    kind: "grid",
+    title: "Who is sitting on your money",
+    subtitle: `${rows.length} ${rows.length === 1 ? "client" : "clients"} past due · ${money} owed`,
+    columns: [
+      { field: "client", header: "Client" },
+      { field: "amount", header: "Overdue" },
+      { field: "invoices", header: "Invoices" },
+      { field: "days_late", header: "Days late" },
+    ],
+    rows: rows.map((row) => ({
+      client: row.client,
+      amount: row.amount,
+      invoices: row.invoices,
+      days_late: row.daysLate,
+    })),
+  };
+}
+
 export const renderBarChart = tool({
   description:
-    "Render an interactive bar chart in the chat. Use for one series compared across clients, periods, or categories. Every value must come from a PayPal tool result in this conversation. Call this instead of describing a chart in prose.",
+    "Draw a bar chart. One series across clients or periods. Call instead of describing a chart.",
   parameters: chartSchema,
   execute: async (input): Promise<BarWidget | null> =>
     normalizeBarWidget(input),
@@ -184,7 +260,7 @@ export const renderBarChart = tool({
 
 export const renderDataGrid = tool({
   description:
-    "Render an interactive, sortable data grid in the chat. Use for multi-column records such as invoices, transactions, or disputes. Every value must come from a PayPal tool result in this conversation. Call this instead of writing a table in prose.",
+    "Draw a sortable data grid for multi-column records such as invoices. Call instead of writing a table.",
   parameters: gridSchema,
   execute: async (input): Promise<GridWidget | null> =>
     normalizeGridWidget(input),

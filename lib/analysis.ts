@@ -357,6 +357,57 @@ export function explainIncomeChange(now: Date = new Date()): IncomeExplanation {
  * Part 2 — cash-flow forecast and "what if"
  * ------------------------------------------------------------------ */
 
+/** One client holding money that should already be in hand. */
+export interface LatePayer {
+  client: string;
+  /** Everything this client owes past its due date. */
+  amount: number;
+  /** How many of that client's invoices are past due. */
+  invoices: number;
+  /** The oldest of them, as yyyy-mm-dd. */
+  oldestDue: string;
+  /** Days that oldest invoice has run past its due date. */
+  daysLate: number;
+}
+
+/**
+ * The clients who did not pay on time, biggest exposure first.
+ *
+ * Grouped by client rather than listed per invoice: the question "who owes me"
+ * is answered by a name and a number, and twelve rows of one client's late
+ * invoices read as noise. Only money past its due date counts — an invoice not
+ * yet due is not late, whatever its status says.
+ */
+export function latePayers(now: Date = new Date()): LatePayer[] {
+  const byClient = new Map<string, LatePayer>();
+
+  for (const invoice of generateHistory()) {
+    const days = overdueDays(invoice, now);
+    if (days <= 0) continue;
+
+    const existing = byClient.get(invoice.client);
+    if (!existing) {
+      byClient.set(invoice.client, {
+        client: invoice.client,
+        amount: invoice.amount,
+        invoices: 1,
+        oldestDue: invoice.due.toISOString().slice(0, 10),
+        daysLate: days,
+      });
+      continue;
+    }
+
+    existing.amount += invoice.amount;
+    existing.invoices += 1;
+    if (days > existing.daysLate) {
+      existing.daysLate = days;
+      existing.oldestDue = invoice.due.toISOString().slice(0, 10);
+    }
+  }
+
+  return [...byClient.values()].sort((a, b) => b.amount - a.amount);
+}
+
 export interface ForecastOptions {
   /** Which horizon the answer should focus on. All three are always returned. */
   window?: ForecastHorizon;

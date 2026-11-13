@@ -522,8 +522,22 @@ export function cardInvoices(
   payloads: InvoicePayload[],
   max = MAX_INVOICE_CARDS,
 ): { shown: InvoicePayload[]; omitted: number } {
-  if (payloads.length <= max) return { shown: payloads, omitted: 0 };
-  return { shown: payloads.slice(0, max), omitted: payloads.length - max };
+  /*
+   * An invoice worth nothing is not a card.
+   *
+   * The sandbox holds drafts created by earlier PDF tests — no client, no line
+   * items, USD 0.00 — and a list turn used to render them beside real invoices,
+   * so "show me my revenue by client" answered with two empty cards. They are
+   * dropped before the cap, not counted as omitted either: there is nothing on
+   * them to open, download or chase.
+   */
+  const worthShowing = payloads.filter((payload) => payload.total > 0);
+
+  if (worthShowing.length <= max) return { shown: worthShowing, omitted: 0 };
+  return {
+    shown: worthShowing.slice(0, max),
+    omitted: worthShowing.length - max,
+  };
 }
 
 /** A filesystem-safe slug for the download filename. */

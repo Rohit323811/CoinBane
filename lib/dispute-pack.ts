@@ -749,6 +749,9 @@ async function draftWithModel(facts: PositionFacts): Promise<string | null> {
     model: coinbaneModel(),
     system: POSITION_SYSTEM,
     prompt: `FACTS\n${factLines(facts)}\n\nWrite the paragraph.`,
+    // Five sentences at most; the cap stops a chatty draft billing tokens no
+    // reader will see.
+    maxTokens: 400,
     // A stalled provider must not hold the download open; the caller falls back.
     abortSignal: AbortSignal.timeout(20_000),
   });

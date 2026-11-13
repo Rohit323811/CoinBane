@@ -239,8 +239,13 @@ export interface ChatResponseBody {
   disputes?: DisputeSummary[];
   /** Names of every tool the agent invoked, for transparency in the UI. */
   toolCalls: string[];
-  /** Set when the agent ran without PayPal credentials. */
-  degraded?: "paypal-unconfigured";
+  /**
+   * Set when the turn is partial. `paypal-unconfigured` means the ledger was
+   * simulated; `model-budget` means the free plan's minute ran out after a tool
+   * had already produced the payload, so the reply carries the data without the
+   * sentence that would have explained it.
+   */
+  degraded?: "paypal-unconfigured" | "model-budget";
   error?: string;
 }
 

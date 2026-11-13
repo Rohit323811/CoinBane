@@ -82,6 +82,35 @@ describe("normalizeGridWidget", () => {
     assert.equal(normalizeGridWidget({ title: "T", rows: [{ client: "a" }] }), null);
   });
 
+  /*
+   * The wire shape: a row is an array of cells in column order. This is what the
+   * model is told to send, because a row object needs a `Record`, and Groq
+   * rejects a schema-valued `additionalProperties` on any tool.
+   */
+  it("reads positional rows, mapping each cell onto its column", () => {
+    const widget = normalizeGridWidget({
+      title: "Invoices",
+      columns,
+      rows: [
+        ["Acme", 4650],
+        ["Meridian", 2500],
+      ],
+    });
+
+    assert.ok(widget);
+    assert.deepEqual(widget.rows[0], { client: "Acme", amount: 4650 });
+    assert.deepEqual(widget.rows[1], { client: "Meridian", amount: 2500 });
+  });
+
+  it("fills a short positional row with nulls rather than dropping it", () => {
+    const widget = normalizeGridWidget({
+      title: "Invoices",
+      columns,
+      rows: [["Acme"]],
+    });
+    assert.deepEqual(widget?.rows[0], { client: "Acme", amount: null });
+  });
+
   it("projects rows onto the declared columns and drops unknown keys", () => {
     const widget = normalizeGridWidget({
       title: "Invoices",

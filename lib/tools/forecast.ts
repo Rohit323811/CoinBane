@@ -27,38 +27,53 @@ export type ForecastToolResult = ForecastWidget &
  */
 export const forecastTool = tool({
   description:
-    "Forecast future income over 30, 60, or 90 days. Use when the user asks about future income, 'what if' scenarios, or 'can I afford X'.",
+    "Forecast income over 30/60/90 days. Use for future income, what-if, or 'can I afford X'.",
   parameters: z.object({
     /*
      * The horizon crosses the model boundary as a string on purpose. A numeric
-     * enum compiles to a JSON-schema enum of numbers, and Gemini rejects that
-     * outright — "Invalid value at ...enum[0] (TYPE_STRING)" — which failed
-     * the whole request, not just this tool. Coerced back to a number below.
+     * enum compiles to a JSON-schema enum of numbers, which a previous provider
+     * rejected outright — "Invalid value at ...enum[0] (TYPE_STRING)" — failing
+     * the whole request, not just this tool. Coerced back to a number below, and
+     * lib/tools.test.ts pins the contract.
      */
     window: z
       .enum(["30", "60", "90"])
       .optional()
-      .describe(
-        "Horizon to answer for, in days, as a string: '30', '60', or '90'. Defaults to '30'. All three horizons are always returned.",
-      ),
+      .describe("Days as a string: '30', '60' or '90'. Defaults to '30'."),
     exclude: z
       .array(z.string())
       .optional()
-      .describe(
-        'Clients to leave out of the projection, e.g. ["Nova Startup"]. Use for "what if X never pays".',
-      ),
+      .describe('Clients to exclude, e.g. ["Nova Startup"].'),
+    /*
+     * A list of pairs rather than a `Record<string, number>`.
+     *
+     * A record compiles to a JSON schema with a schema-valued
+     * `additionalProperties`, which Groq's validator rejects — it requires
+     * `additionalProperties: false` on every object. An array of named entries
+     * carries the same information in a shape both providers accept, and is
+     * converted back to a record before the analysis sees it.
+     */
     delays: z
-      .record(z.string(), z.number())
+      .array(
+        z.object({
+          client: z.string().describe("Client name on the invoice."),
+          days: z.number().describe("Extra days late."),
+        }),
+      )
       .optional()
-      .describe(
-        'Extra days a client is expected to pay late, e.g. { "BigCorp Ltd": 10 }. Use for "what if X pays N days later".',
-      ),
+      .describe('Clients paying late, e.g. [{ "client": "BigCorp Ltd", "days": 10 }].'),
   }),
   execute: async (input): Promise<ForecastToolResult> => {
+    // Back to the record the analysis works in, keyed by client name.
+    const delays = input.delays?.reduce<Record<string, number>>((acc, entry) => {
+      acc[entry.client] = entry.days;
+      return acc;
+    }, {});
+
     const forecast = forecastCashflow({
       window: input.window ? (Number(input.window) as ForecastHorizon) : undefined,
       exclude: input.exclude,
-      delays: input.delays,
+      delays,
     });
 
     return {

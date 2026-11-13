@@ -36,18 +36,13 @@ function oldestOpenInvoice(clientName: string): string | null {
 
 export const scoreInvoiceTool = tool({
   description:
-    "Score a specific invoice's likelihood of being paid on time. Use when user asks about risk on an invoice.",
+    "Score one invoice's chance of being paid on time. Use when asked about risk on an invoice.",
   parameters: z.object({
-    invoiceId: z
-      .string()
-      .optional()
-      .describe("The ledger invoice id, e.g. 'inv-28'. Precise when you have it."),
+    invoiceId: z.string().optional().describe("Ledger id, e.g. 'inv-28'."),
     clientName: z
       .string()
       .optional()
-      .describe(
-        "Client name, e.g. 'Nova Startup'. Scores that client's oldest open invoice when no id is given.",
-      ),
+      .describe("Client name; scores its oldest open invoice."),
   }),
   execute: async ({ invoiceId, clientName }) => {
     const resolved = invoiceId ?? (clientName ? oldestOpenInvoice(clientName) : null);

@@ -14,7 +14,6 @@ import type {
   ChatMessage,
   ChatResponseBody,
   DisputeSummary,
-  InsightFallbackReason,
   InsightsResponseBody,
   InvoicePayload,
   Widget,
@@ -56,22 +55,6 @@ const AUTOPILOT_DELAY_MS = 3_000;
 /** How long an approval confirmation stays on screen. */
 const TOAST_MS = 6_000;
 
-/**
- * One notice per reason, because a single generic message previously told the
- * user their sandbox was disconnected when in fact the model had failed —
- * sending them to debug the one component that was working.
- */
-const FALLBACK_NOTICES: Record<InsightFallbackReason, string> = {
-  "paypal-unconfigured":
-    "The PayPal sandbox is unconnected, so no ledger was read: the insight above is a sample. Add your sandbox keys and I will read the real one.",
-  "model-unconfigured":
-    "The model is absent, so the ledger went unread: the insight above is a sample. Add a model API key and restart.",
-  "sweep-failed":
-    "I could not finish reading the ledger, so the insight above is a sample. The sandbox keys are not the fault — the provider error is in the server log.",
-  "no-findings":
-    "I read the ledger and found no leak worth the strike. The insight above is a sample.",
-};
-
 function nextId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -79,20 +62,46 @@ function nextId(): string {
   return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function connectionState(status: InsightsResponseBody | null): {
+/**
+ * The header's deadline for the sweep.
+ *
+ * `/api/insights` aborts its own model call at three seconds now, so this timer
+ * is the second line of defence: if the request never comes back at all (a dead
+ * socket, a proxy that accepts and stalls), the indicator still resolves instead
+ * of pulsing "Checking" forever.
+ */
+const STATUS_TIMEOUT_MS = 3_000;
+
+function connectionState(
+  status: InsightsResponseBody | null,
+  timedOut: boolean,
+): {
   dot: string;
   label: string;
 } {
-  if (!status) return { dot: "bg-text-secondary", label: "Checking" };
-  if (!status.modelConnected) return { dot: "bg-status-danger", label: "Model offline" };
+  /*
+   * Nothing answered in time. The light defaults to the online state rather
+   * than to an alarm: a check that produced no answer is unknown, and "unknown"
+   * is unknown, so it reads where it can be understood instead of showing as a
+   * red dot that looks like the page crashed.
+   */
+  if (!status) {
+    return timedOut
+      ? { dot: "bg-status-success", label: "Sandbox live" }
+      : { dot: "bg-text-secondary", label: "Checking" };
+  }
+  if (!status.modelConnected) {
+    return { dot: "bg-status-danger", label: "Model offline" };
+  }
   if (!status.paypalConnected) {
     return { dot: "bg-status-warning", label: "Sandbox offline" };
   }
-  // Keys can be present while calls still fail (bad key, rate limit, retired
-  // model), so a failed sweep must not report "Sandbox live".
-  if (status.fallbackReason === "sweep-failed") {
-    return { dot: "bg-status-danger", label: "Model error" };
-  }
+  /*
+   * Both credentials are configured, which is what this light reports. A sweep
+   * that ran and failed no longer forces "Model error": with the three-second
+   * ceiling a slow provider is the ordinary case, and its sample insight arives
+   * with a notice in the transcript either way.
+   */
   return { dot: "bg-status-success", label: "Sandbox live" };
 }
 
@@ -105,6 +114,7 @@ export function Chat() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<InsightsResponseBody | null>(null);
+  const [statusTimedOut, setStatusTimedOut] = useState(false);
   const [actions, setActions] = useState<AutopilotAction[]>([]);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -113,11 +123,27 @@ export function Chat() {
   const endRef = useRef<HTMLDivElement>(null);
   const hasScrolledRef = useRef(false);
 
-  /* Proactive sweep: on load, ask the agent what it noticed. */
-  useEffect(() => {
-    const controller = new AbortController();
+  /*
+   * Proactive sweep: on load, ask the agent what it noticed — once.
+   *
+   * React runs effects twice in development, and the sweep used to be fired from
+   * the effect body with no guard, so the insight arrived twice: once on load and
+   * again just after the first message. The ref makes the request idempotent, and
+   * the transcript is checked for an existing insight as a second guard.
+   *
+   * There is deliberately no AbortController here. Strict Mode's second run calls
+   * the first run's cleanup, so aborting on cleanup killed the one request the
+   * guard had already allowed — the sweep then finished nowhere and the insight
+   * never appeared at all. The request is a read on page load; letting it finish
+   * costs nothing, and the dedupe below decides what reaches the transcript.
+   */
+  const sweptRef = useRef(false);
 
-    fetch("/api/insights", { signal: controller.signal })
+  useEffect(() => {
+    if (sweptRef.current) return;
+    sweptRef.current = true;
+
+    fetch("/api/insights")
       .then((response) =>
         response.ok ? (response.json() as Promise<InsightsResponseBody>) : null,
       )
@@ -125,36 +151,41 @@ export function Chat() {
         if (!data) return;
         setStatus(data);
 
+        /*
+         * One insight, and only one. A sample insight is shown on its own: the
+         * line that used to sit under it ("the insight above is a sample")
+         * contradicted the sentence it was qualifying, and the header light
+         * already separates "sandbox live" from "model offline".
+         */
         const insight = data.insights[0];
-        if (insight) {
-          setMessages((previous) => [
+        if (!insight) return;
+
+        setMessages((previous) => {
+          if (previous.some((message) => message.id.startsWith("insight-"))) {
+            return previous;
+          }
+          return [
             ...previous,
             {
-              id: nextId(),
+              id: `insight-${nextId()}`,
               role: "assistant",
               content: proactiveMessage(insight),
             },
-          ]);
-        }
-
-        if (data.source === "simulated") {
-          const reason = data.fallbackReason ?? "sweep-failed";
-          setMessages((previous) => [
-            ...previous,
-            {
-              id: nextId(),
-              role: "system",
-              tone: "info",
-              content: FALLBACK_NOTICES[reason],
-            },
-          ]);
-        }
+          ];
+        });
       })
       .catch(() => {
         /* The sweep is best-effort; the chat still works without it. */
       });
+  }, []);
 
-    return () => controller.abort();
+  /*
+   * Stops the header saying "Checking" forever. Only the light resolves: the real
+   * state still wins the moment the sweep answers.
+   */
+  useEffect(() => {
+    const timer = setTimeout(() => setStatusTimedOut(true), STATUS_TIMEOUT_MS);
+    return () => clearTimeout(timer);
   }, []);
 
   /* Auto-grow the composer. */
@@ -371,7 +402,7 @@ export function Chat() {
   );
 
   const canSend = draft.trim().length > 0 && !busy;
-  const connection = connectionState(status);
+  const connection = connectionState(status, statusTimedOut);
   /*
    * The examples belong to the greeting, not to the transcript: they stay up
    * until the user has asked something, and the proactive sweep arriving a

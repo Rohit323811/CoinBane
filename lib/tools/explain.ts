@@ -12,7 +12,7 @@ import { explainIncomeChange } from "../analysis.ts";
  */
 export const explainIncomeTool = tool({
   description:
-    "Explain why the user's income changed. Use when they ask 'why am I broke', 'why is income down', or 'what happened this month'.",
+    "Explain why income changed. Use for 'why am I broke', 'why is income down', 'what happened this month'.",
   parameters: z.object({}),
   execute: async () => explainIncomeChange(),
 });

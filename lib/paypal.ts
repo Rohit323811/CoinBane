@@ -21,12 +21,22 @@ export function isPayPalConfigured(): boolean {
   return paypalCredentials() !== null;
 }
 
-/** Returns the sandbox toolkit, or null when credentials are absent. */
+/**
+ * Returns the sandbox toolkit, or null when credentials are absent or unusable.
+ *
+ * Construction is wrapped because a bad or revoked client pair can fail here
+ * rather than at call time. A throw would take down the whole turn — the
+ * intelligence tools are local reads and have no reason to care about PayPal
+ * — so a failed toolkit degrades to the simulated ledger instead. Nothing is
+ * cached on failure, so fixing the keys works on the next request without a
+ * restart.
+ */
 export function getPayPalToolkit(): PayPalAgentToolkit | null {
   const credentials = paypalCredentials();
   if (!credentials) return null;
+  if (cached) return cached;
 
-  if (!cached) {
+  try {
     cached = new PayPalAgentToolkit({
       clientId: credentials.clientId,
       clientSecret: credentials.clientSecret,
@@ -48,6 +58,24 @@ export function getPayPalToolkit(): PayPalAgentToolkit | null {
         },
       },
     });
+
+    /*
+     * Logged once per process, on success. This is the proof that the two
+     * credentials were *read* — the masked tail tells two sandbox apps apart
+     * without putting a secret in a log line, and a request that later fails
+     * with a 401 can be told apart from one that never had keys at all.
+     */
+    console.info(
+      `[coinbane] PayPal sandbox toolkit ready (client id …${
+        credentials.clientId.slice(-4)
+      }, sandbox: true).`,
+    );
+  } catch (error) {
+    console.error(
+      "[coinbane] PayPal toolkit failed to initialise; answering from the simulated ledger:",
+      error,
+    );
+    return null;
   }
 
   return cached;
@@ -59,9 +87,138 @@ export function getPayPalToolkit(): PayPalAgentToolkit | null {
  * `getTools()` returns AI SDK `Tool` objects built by this package's own
  * `ai` dependency; the app pins the same major so the objects are compatible.
  */
-export function paypalTools(): ToolSet | null {
+function rawTools(): ToolSet | null {
   const toolkit = getPayPalToolkit();
-  return toolkit ? toolkit.getTools() : null;
+  if (!toolkit) return null;
+
+  // Same reasoning as construction: a tool set the model cannot get is a
+  // missing feature, not a failed request.
+  try {
+    return toolkit.getTools();
+  } catch (error) {
+    console.error(
+      "[coinbane] PayPal tools unavailable; answering from the simulated ledger:",
+      error,
+    );
+    return null;
+  }
+}
+
+/*
+ * A page of sandbox records is far larger than the model needs.
+ *
+ * Twenty-two invoices serialise to about 24,000 characters — roughly 8,000
+ * tokens, which is the free plan's entire per-minute window, so the *second*
+ * step of a turn (the one that reads the tool result) was being refused as "too
+ * large" and the user saw a quota message for a turn that never had a chance.
+ *
+ * Two things shrink it without losing anything the answer needs:
+ *
+ * 1. `links` is 60% of each record — a list of PayPal endpoints for editing,
+ *    cancelling and sending. Nothing here reads it: the payer URL the PDF's QR
+ *    encodes lives at `detail.metadata.recipient_view_url`, and the invoice
+ *    cards are built from `detail`, `amount` and `primary_recipients`.
+ * 2. A turn only ever shows three cards, so records past the cap are dropped
+ *    with a note saying how many there were. "22 invoices, 8 shown" is a
+ *    truthful tool result; a silent truncation would not be.
+ */
+const MAX_MODEL_RECORDS = 8;
+
+/** Drops the endpoint lists from a record, keeping every field a reader needs. */
+function stripLinks(record: unknown): unknown {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return record;
+  const copy = { ...(record as Record<string, unknown>) };
+  delete copy.links;
+  return copy;
+}
+
+/**
+ * Compacts a list response: fewer records, no endpoint lists, an honest note.
+ *
+ * The toolkit answers with a JSON *string*, so it is parsed first — treating the
+ * string as a record would compact nothing, which is exactly what the free plan
+ * caught when this ran against a real page.
+ */
+export function compactPage(payload: unknown): unknown {
+  let parsed = payload;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return payload;
+    }
+  }
+
+  const records = pageRecords(parsed);
+  if (records.length === 0) return parsed;
+
+  const kept = records.slice(0, MAX_MODEL_RECORDS).map(stripLinks);
+
+  /*
+   * The envelope's `total` is kept when PayPal sent one, and the note is added
+   * on top so the model can say "16 more not shown" instead of believing the
+   * page is the whole ledger.
+   */
+  const envelope =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  const total = typeof envelope.total_items === "number" ? envelope.total_items : undefined;
+  const omitted = (total ?? records.length) - kept.length;
+
+  return {
+    ...envelope,
+    items: kept,
+    ...(omitted > 0
+      ? { note: `showing ${kept.length} of ${total ?? records.length} records; ${omitted} not shown` }
+      : {}),
+  };
+}
+
+/** Tools the model sees, with list results compacted. Never the raw pages. */
+export function paypalTools(): ToolSet | null {
+  const tools = rawTools();
+  if (!tools) return null;
+
+  /*
+   * Three of the toolkit's eight tools are not offered to the model at all:
+   * sending an invoice, sending a reminder, and reading one dispute. Each is a
+   * full schema — around 600 characters on the wire — and each duplicates
+   * something already here: `create_invoice` creates and sends, the reminder
+   * runs through POST /api/autopilot, and `list_disputes` returns whole records
+   * rather than references, so `get_dispute` is a second read of the same data.
+   *
+   * The free plan gives 8,000 tokens a minute and one step of a two-step turn
+   * already carries the whole catalogue, so a tool nobody asks for is paid for
+   * twice on every turn that uses any tool at all.
+   */
+  const MODEL_TOOL_NAMES = [
+    "create_invoice",
+    "list_invoices",
+    "get_invoice",
+    "list_disputes",
+    "list_transactions",
+  ];
+
+  const compacted: Record<string, unknown> = {};
+  for (const name of MODEL_TOOL_NAMES) {
+    if (tools[name]) compacted[name] = tools[name];
+  }
+
+  for (const name of ["list_invoices", "list_transactions", "list_disputes"]) {
+    const tool = compacted[name] as
+      | { execute?: (...args: unknown[]) => Promise<unknown> }
+      | undefined;
+    const execute = tool?.execute;
+    if (!tool || typeof execute !== "function") continue;
+
+    compacted[name] = {
+      ...tool,
+      execute: async (...args: unknown[]) => compactPage(await execute(...args)),
+    };
+  }
+
+  return compacted as ToolSet;
 }
 
 /**
@@ -120,7 +277,12 @@ async function callTool(
   input: Record<string, unknown>,
   what: string,
 ): Promise<unknown | null> {
-  const tool = (paypalTools() as Record<string, unknown> | null)?.[action] as
+  /*
+   * Raw tools, not the compacted set: the insights sweep and the dispute pack
+   * read every record on the account, and they are not sent to a model, so the
+   * page cap would only cost them data.
+   */
+  const tool = (rawTools() as Record<string, unknown> | null)?.[action] as
     | { execute?: (input: Record<string, unknown>) => Promise<unknown> }
     | undefined;
 
